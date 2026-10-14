@@ -1,0 +1,98 @@
+name: Build Echo installers for free
+run-name: Echo free build ${{ inputs.commit }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        type: string
+        required: true
+      source-sha256:
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: echo-free-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            target: aarch64-apple-darwin
+          - platform: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ECHO_ARCHIVE_KEY: ${{ secrets.ECHO_ARCHIVE_KEY }}
+      ECHO_COMMIT: ${{ inputs.commit }}
+      ECHO_SOURCE_SHA256: ${{ inputs.source-sha256 }}
+      ECHO_TARGET: ${{ matrix.target }}
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Download and open the private source snapshot
+        run: |
+          set -euo pipefail
+          [[ "$ECHO_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$ECHO_SOURCE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          gh release download v1.0.0 --repo "$GITHUB_REPOSITORY" --pattern "echo-source-$ECHO_COMMIT.tar.gz.enc" --dir "$RUNNER_TEMP"
+          python3 -c 'import hashlib,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/("echo-source-"+os.environ["ECHO_COMMIT"]+".tar.gz.enc"); assert hashlib.file_digest(p.open("rb"),"sha256").hexdigest()==os.environ["ECHO_SOURCE_SHA256"]'
+          salt_args=()
+          help_text=$(openssl enc -help 2>&1 || true)
+          if [[ "$help_text" == *'-saltlen'* ]]; then salt_args=(-saltlen 8); fi
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "${salt_args[@]}" -pass env:ECHO_ARCHIVE_KEY -in "$RUNNER_TEMP/echo-source-$ECHO_COMMIT.tar.gz.enc" -out "$RUNNER_TEMP/source.tar.gz"
+          mkdir "$RUNNER_TEMP/source"
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C "$RUNNER_TEMP/source"
+          rm "$RUNNER_TEMP/source.tar.gz"
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config build-essential libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev clang cmake libssl-dev libasound2-dev libxdo-dev libayatana-appindicator3-dev
+      - name: Check and build installers with private logs
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/source"
+          python3 scripts/free_ci_build.py --target "$ECHO_TARGET" --commit "$ECHO_COMMIT" --output "$RUNNER_TEMP/packages" > "$RUNNER_TEMP/build.log" 2>&1 || { echo 'Build failed; the developer can read the encrypted build log.'; exit 1; }
+          tar -czf "$RUNNER_TEMP/packages.tar.gz" -C "$RUNNER_TEMP/packages" .
+          salt_args=()
+          help_text=$(openssl enc -help 2>&1 || true)
+          if [[ "$help_text" == *'-saltlen'* ]]; then salt_args=(-saltlen 8); fi
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 "${salt_args[@]}" -pass env:ECHO_ARCHIVE_KEY -in "$RUNNER_TEMP/packages.tar.gz" -out "$RUNNER_TEMP/echo-build-$ECHO_TARGET-$ECHO_COMMIT.tar.gz.enc"
+          gh release upload v1.0.0 "$RUNNER_TEMP/echo-build-$ECHO_TARGET-$ECHO_COMMIT.tar.gz.enc" --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Save the encrypted build log
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/build.log" ]; then
+            salt_args=()
+            help_text=$(openssl enc -help 2>&1 || true)
+            if [[ "$help_text" == *'-saltlen'* ]]; then salt_args=(-saltlen 8); fi
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 "${salt_args[@]}" -pass env:ECHO_ARCHIVE_KEY -in "$RUNNER_TEMP/build.log" -out "$RUNNER_TEMP/echo-log-$ECHO_TARGET-$ECHO_COMMIT.enc"
+            gh release upload v1.0.0 "$RUNNER_TEMP/echo-log-$ECHO_TARGET-$ECHO_COMMIT.enc" --repo "$GITHUB_REPOSITORY" --clobber
+          fi
