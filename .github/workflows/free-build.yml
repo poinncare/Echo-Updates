@@ -7,6 +7,9 @@ on:
       commit:
         type: string
         required: true
+      target-only:
+        type: string
+        required: false
       source-sha256:
         type: string
         required: true
@@ -24,17 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: macos-14
-            target: aarch64-apple-darwin
-          - platform: macos-15-intel
-            target: x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - platform: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
+        include: ${{ inputs.target-only == 'windows' && fromJSON('[{"platform":"windows-latest","target":"x86_64-pc-windows-msvc"}]') || fromJSON('[{"platform":"macos-14","target":"aarch64-apple-darwin"},{"platform":"macos-15-intel","target":"x86_64-apple-darwin"},{"platform":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu"},{"platform":"ubuntu-22.04-arm","target":"aarch64-unknown-linux-gnu"},{"platform":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     runs-on: ${{ matrix.platform }}
     defaults:
       run:
@@ -75,18 +68,32 @@ jobs:
           set +u
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "${salt_args[@]}" -pass env:ECHO_ARCHIVE_KEY -in "$RUNNER_TEMP/echo-source-$ECHO_COMMIT.tar.gz.enc" -out "$RUNNER_TEMP/source.tar.gz"
           mkdir "$RUNNER_TEMP/source"
-          python3 -c 'import os,pathlib,tarfile; p=pathlib.Path(os.environ["RUNNER_TEMP"]); tarfile.open(p/"source.tar.gz").extractall(p/"source",filter="data")'
+          python3 -c 'import os,pathlib,tarfile; p=pathlib.Path(os.environ["RUNNER_TEMP"]); tarfile.open(p/"source.tar.gz").extractall(p/"source",filter=lambda m,d: None if "\r" in m.name else tarfile.data_filter(m,d))'
           rm "$RUNNER_TEMP/source.tar.gz"
       - name: Install Linux prerequisites
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config build-essential libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev clang cmake libssl-dev libasound2-dev libxdo-dev libayatana-appindicator3-dev
+      - name: Rebuild the Windows transcription engine privately
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          gh release download v1.0.0 --repo "$GITHUB_REPOSITORY" --pattern "echo-windows-libs-$ECHO_COMMIT.tar.gz.enc" --dir "$RUNNER_TEMP"
+          salt_args=()
+          help_text=$(openssl enc -help 2>&1 || true)
+          if [[ "$help_text" == *'-saltlen'* ]]; then salt_args=(-saltlen 8); fi
+          set +u
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 "${salt_args[@]}" -pass env:ECHO_ARCHIVE_KEY -in "$RUNNER_TEMP/echo-windows-libs-$ECHO_COMMIT.tar.gz.enc" -out "$RUNNER_TEMP/windows-libs.tar.gz"
+          python3 -c 'import os,pathlib,tarfile; p=pathlib.Path(os.environ["RUNNER_TEMP"]); tarfile.open(p/"windows-libs.tar.gz").extractall(p/"source/server/libs",members=[m for m in tarfile.open(p/"windows-libs.tar.gz").getmembers() if m.name.startswith("lib/")],filter="data")'
+          cd "$RUNNER_TEMP/source/server"
+          cargo build --locked --release --target "$ECHO_TARGET" -p echo-server > "$RUNNER_TEMP/build.log" 2>&1 || { echo 'Engine build failed; the developer can read the encrypted log.'; exit 1; }
+          cp "target/$ECHO_TARGET/release/echo-server.exe" "../desktop/src-tauri/binaries/echo-server-$ECHO_TARGET.exe"
       - name: Check and build installers with private logs
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/source"
-          python3 scripts/free_ci_build.py --target "$ECHO_TARGET" --commit "$ECHO_COMMIT" --output "$RUNNER_TEMP/packages" > "$RUNNER_TEMP/build.log" 2>&1 || { echo 'Build failed; the developer can read the encrypted build log.'; exit 1; }
+          python3 scripts/free_ci_build.py --target "$ECHO_TARGET" --commit "$ECHO_COMMIT" --output "$RUNNER_TEMP/packages" >> "$RUNNER_TEMP/build.log" 2>&1 || { echo 'Build failed; the developer can read the encrypted build log.'; exit 1; }
           python3 -c 'import os,pathlib,tarfile; p=pathlib.Path(os.environ["RUNNER_TEMP"]); a=tarfile.open(p/"packages.tar.gz","w:gz"); [a.add(f,arcname=f.name) for f in (p/"packages").iterdir()]; a.close()'
           salt_args=()
           help_text=$(openssl enc -help 2>&1 || true)
