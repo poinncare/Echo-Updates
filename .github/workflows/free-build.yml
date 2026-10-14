@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: echo-free-build
+  group: echo-free-build-${{ inputs.target-only || 'all' }}
   cancel-in-progress: false
 
 jobs:
