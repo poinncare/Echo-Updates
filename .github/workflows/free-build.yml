@@ -62,7 +62,7 @@ jobs:
           [[ "$ECHO_COMMIT" =~ ^[a-f0-9]{40}$ ]]
           [[ "$ECHO_SOURCE_SHA256" =~ ^[a-f0-9]{64}$ ]]
           gh release download v1.0.0 --repo "$GITHUB_REPOSITORY" --pattern "echo-source-$ECHO_COMMIT.tar.gz.enc" --dir "$RUNNER_TEMP"
-          python3 -c 'import hashlib,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/("echo-source-"+os.environ["ECHO_COMMIT"]+".tar.gz.enc"); assert hashlib.file_digest(p.open("rb"),"sha256").hexdigest()==os.environ["ECHO_SOURCE_SHA256"]'
+          python3 -c 'import hashlib,os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/("echo-source-"+os.environ["ECHO_COMMIT"]+".tar.gz.enc"); assert hashlib.sha256(p.read_bytes()).hexdigest()==os.environ["ECHO_SOURCE_SHA256"]'
           salt_args=()
           help_text=$(openssl enc -help 2>&1 || true)
           if [[ "$help_text" == *'-saltlen'* ]]; then salt_args=(-saltlen 8); fi
