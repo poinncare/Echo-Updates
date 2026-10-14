@@ -1,0 +1,9 @@
+name: Check free build availability
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo 'Standard public runner is available'
